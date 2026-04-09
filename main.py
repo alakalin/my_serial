@@ -170,6 +170,10 @@ class SerialTab(QWidget):
         self.receive_area = QPlainTextEdit()
         self.receive_area.setReadOnly(True)
         self.receive_area.setPlaceholderText("接收数据显示区域")
+        self.receive_area.setStyleSheet(
+            "QPlainTextEdit { selection-background-color: #FFB300; selection-color: #1A1A1A; }"
+        )
+
 
         search_top_layout = QHBoxLayout()
         self.search_input = QLineEdit()
@@ -517,8 +521,9 @@ class SerialTab(QWidget):
             QMessageBox.critical(self, "发送失败", str(e))
 
     def find_text(self, forward: bool = True) -> None:
-        keyword = self.search_input.text()
+        keyword = self.search_input.text().strip()
         if not keyword:
+            self.clear_highlight()
             return
 
         flags = QTextDocument.FindFlag()
@@ -526,25 +531,38 @@ class SerialTab(QWidget):
             flags |= QTextDocument.FindBackward
 
         found = self.receive_area.find(keyword, flags)
+        if not found:
+            cursor = self.receive_area.textCursor()
+            cursor.movePosition(QTextCursor.Start if forward else QTextCursor.End)
+            self.receive_area.setTextCursor(cursor)
+            found = self.receive_area.find(keyword, flags)
+
         if found:
-            return
+            self.highlight_all_matches(current_cursor=self.receive_area.textCursor(), force_focus=False)
 
-        cursor = self.receive_area.textCursor()
-        cursor.movePosition(QTextCursor.Start if forward else QTextCursor.End)
-        self.receive_area.setTextCursor(cursor)
-        self.receive_area.find(keyword, flags)
-
-    def highlight_all_matches(self) -> None:
-        keyword = self.search_input.text()
+    def highlight_all_matches(self, current_cursor: Optional[QTextCursor] = None, force_focus: bool = True) -> None:
+        keyword = self.search_input.text().strip()
         if not keyword:
+            self.clear_highlight()
             return
 
         doc = self.receive_area.document()
         selections = []
         search_cursor = QTextCursor(doc)
 
-        fmt = QTextCharFormat()
-        fmt.setBackground(QColor("#FFE58F"))
+        normal_fmt = QTextCharFormat()
+        normal_fmt.setBackground(QColor("#FFB300"))
+        normal_fmt.setForeground(QColor("#1A1A1A"))
+
+        current_fmt = QTextCharFormat()
+        current_fmt.setBackground(QColor("#FF7A00"))
+        current_fmt.setForeground(QColor("#111111"))
+
+        current_start = -1
+        current_end = -1
+        if current_cursor and not current_cursor.isNull() and current_cursor.hasSelection():
+            current_start = current_cursor.selectionStart()
+            current_end = current_cursor.selectionEnd()
 
         while True:
             search_cursor = doc.find(keyword, search_cursor)
@@ -552,11 +570,24 @@ class SerialTab(QWidget):
                 break
 
             selection = QTextEdit.ExtraSelection()
-            selection.cursor = search_cursor
-            selection.format = fmt
+            selection.cursor = QTextCursor(search_cursor)
+
+            if (
+                current_start >= 0
+                and search_cursor.selectionStart() == current_start
+                and search_cursor.selectionEnd() == current_end
+            ):
+                selection.format = current_fmt
+            else:
+                selection.format = normal_fmt
+
             selections.append(selection)
 
         self.receive_area.setExtraSelections(selections)
+        if force_focus:
+            self.receive_area.setFocus(Qt.OtherFocusReason)
+        self.receive_area.viewport().update()
+
 
 
     def clear_highlight(self) -> None:
