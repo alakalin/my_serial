@@ -47,14 +47,6 @@ pyinstaller --noconfirm --clean SerialAssistant.spec
 
 - `dist/SerialAssistant_onefile.exe`
 
-## Git 建议
-
-当前 `.gitignore` 已忽略：
-- Python 缓存、虚拟环境
-- `build/`、`dist/`、`*.spec`、临时日志
-- IDE 配置目录
-
-如果你希望把打包出来的 exe 一起提交到仓库，请把 `.gitignore` 中 `dist/` 或 `*.exe` 规则按需放开。
 
 ## 环境信息
 
