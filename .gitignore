@@ -1,0 +1,43 @@
+# Python cache & bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build / packaging artifacts
+build/
+dist/
+*.spec
+!SerialAssistant.spec
+
+*.manifest
+*.exe
+*.pkg
+
+# Installer / wheel artifacts
+*.egg-info/
+.eggs/
+*.whl
+pip-wheel-metadata/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Logs / runtime temp
+*.log
+*.tmp
+
+# IDE / OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+Thumbs.db
+Desktop.ini

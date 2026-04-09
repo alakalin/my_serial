@@ -1,12 +1,15 @@
+import os
 import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
+
 import serial
 from PySide6.QtCore import QThread, QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QTextCharFormat, QTextCursor, QTextDocument
+from PySide6.QtGui import QColor, QIcon, QTextCharFormat, QTextCursor, QTextDocument
+
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -22,9 +25,11 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QSplitter,
     QTabWidget,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
+
 from serial.tools import list_ports
 
 
@@ -47,8 +52,14 @@ PARITY = {
 }
 
 
+def resource_path(relative_path: str) -> str:
+    base_path = getattr(sys, "_MEIPASS", os.path.abspath("."))
+    return os.path.join(base_path, relative_path)
+
+
 @dataclass
 class SerialConfig:
+
     port: str
     baud_rate: int
     data_bits: int
@@ -147,25 +158,32 @@ class SerialTab(QWidget):
         self.receive_area.setReadOnly(True)
         self.receive_area.setPlaceholderText("接收数据显示区域")
 
-        search_layout = QHBoxLayout()
+        search_top_layout = QHBoxLayout()
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("搜索/高亮关键字")
+        self.search_input.setPlaceholderText("搜索关键字")
         self.search_prev_button = QPushButton("上一个")
         self.search_next_button = QPushButton("下一个")
+
+        search_top_layout.addWidget(QLabel("搜索"))
+        search_top_layout.addWidget(self.search_input, 1)
+        search_top_layout.addWidget(self.search_prev_button)
+        search_top_layout.addWidget(self.search_next_button)
+
+        search_bottom_layout = QHBoxLayout()
         self.highlight_button = QPushButton("高亮全部")
         self.clear_highlight_button = QPushButton("清除高亮")
+        search_bottom_layout.addWidget(self.highlight_button)
+        search_bottom_layout.addWidget(self.clear_highlight_button)
+        search_bottom_layout.addStretch(1)
 
-        search_layout.addWidget(QLabel("搜索"))
-        search_layout.addWidget(self.search_input)
-        search_layout.addWidget(self.search_prev_button)
-        search_layout.addWidget(self.search_next_button)
-        search_layout.addWidget(self.highlight_button)
-        search_layout.addWidget(self.clear_highlight_button)
-
-        send_layout = QHBoxLayout()
+        send_input_layout = QHBoxLayout()
         self.send_input = QLineEdit()
         self.send_input.setPlaceholderText("输入要发送的数据")
+        self.send_button = QPushButton("发送")
+        send_input_layout.addWidget(self.send_input, 1)
+        send_input_layout.addWidget(self.send_button)
 
+        control_top_layout = QHBoxLayout()
         self.hex_mode_checkbox = QCheckBox("HEX收发")
         self.add_newline_checkbox = QCheckBox("发送附加\\r\\n")
         self.timestamp_checkbox = QCheckBox("显示时间戳")
@@ -173,32 +191,38 @@ class SerialTab(QWidget):
         self.auto_scroll_checkbox = QCheckBox("自动滚动(接收)")
         self.auto_scroll_checkbox.setChecked(True)
 
-        self.loop_send_checkbox = QCheckBox("定时发送")
+        control_top_layout.addWidget(self.hex_mode_checkbox)
+        control_top_layout.addWidget(self.add_newline_checkbox)
+        control_top_layout.addWidget(self.timestamp_checkbox)
+        control_top_layout.addWidget(self.auto_scroll_checkbox)
+        control_top_layout.addStretch(1)
 
+        control_bottom_layout = QHBoxLayout()
+        self.loop_send_checkbox = QCheckBox("定时发送")
         self.loop_interval_spin = QSpinBox()
         self.loop_interval_spin.setRange(10, 60000)
         self.loop_interval_spin.setValue(1000)
         self.loop_interval_spin.setSuffix(" ms")
-
-        self.send_button = QPushButton("发送")
         self.clear_button = QPushButton("清空接收区")
 
-        send_layout.addWidget(self.send_input)
-        send_layout.addWidget(self.hex_mode_checkbox)
-        send_layout.addWidget(self.add_newline_checkbox)
-        send_layout.addWidget(self.timestamp_checkbox)
-        send_layout.addWidget(self.loop_send_checkbox)
-        send_layout.addWidget(self.loop_interval_spin)
-        send_layout.addWidget(self.send_button)
-        send_layout.addWidget(self.clear_button)
+        control_bottom_layout.addWidget(self.loop_send_checkbox)
+        control_bottom_layout.addWidget(self.loop_interval_spin)
+        control_bottom_layout.addWidget(self.clear_button)
+        control_bottom_layout.addStretch(1)
 
         self.stats_label = QLabel("RX: 0 bytes | TX: 0 bytes | 未连接")
 
         root_layout.addLayout(top_layout)
-        root_layout.addWidget(self.receive_area)
-        root_layout.addLayout(search_layout)
-        root_layout.addLayout(send_layout)
+        root_layout.addWidget(self.receive_area, 1)
+        root_layout.addLayout(search_top_layout)
+        root_layout.addLayout(search_bottom_layout)
+        root_layout.addLayout(send_input_layout)
+        root_layout.addLayout(control_top_layout)
+        root_layout.addLayout(control_bottom_layout)
         root_layout.addWidget(self.stats_label)
+
+
+
 
         self.loop_timer = QTimer(self)
 
@@ -211,8 +235,10 @@ class SerialTab(QWidget):
 
         self.search_prev_button.clicked.connect(lambda: self.find_text(forward=False))
         self.search_next_button.clicked.connect(lambda: self.find_text(forward=True))
+        self.search_input.returnPressed.connect(lambda: self.find_text(forward=True))
         self.highlight_button.clicked.connect(self.highlight_all_matches)
         self.clear_highlight_button.clicked.connect(self.clear_highlight)
+
 
     def _on_loop_send_changed(self, state: int) -> None:
         if state == Qt.Checked:
@@ -397,20 +423,24 @@ class SerialTab(QWidget):
             return
 
         doc = self.receive_area.document()
-        cursor = doc.find(keyword, 0)
         selections = []
+        search_cursor = QTextCursor(doc)
 
         fmt = QTextCharFormat()
         fmt.setBackground(QColor("#FFE58F"))
 
-        while not cursor.isNull():
-            selection = QPlainTextEdit.ExtraSelection()
-            selection.cursor = cursor
+        while True:
+            search_cursor = doc.find(keyword, search_cursor)
+            if search_cursor.isNull():
+                break
+
+            selection = QTextEdit.ExtraSelection()
+            selection.cursor = search_cursor
             selection.format = fmt
             selections.append(selection)
-            cursor = doc.find(keyword, cursor)
 
         self.receive_area.setExtraSelections(selections)
+
 
     def clear_highlight(self) -> None:
         self.receive_area.setExtraSelections([])
@@ -565,9 +595,17 @@ class MainWindow(QMainWindow):
 
 def main() -> None:
     app = QApplication(sys.argv)
+    icon_path = resource_path(os.path.join("assets", "app.ico"))
+    icon = QIcon(icon_path)
+    if not icon.isNull():
+        app.setWindowIcon(icon)
+
     window = MainWindow()
+    if not icon.isNull():
+        window.setWindowIcon(icon)
     window.show()
     sys.exit(app.exec())
+
 
 
 if __name__ == "__main__":
