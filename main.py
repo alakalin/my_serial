@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QFileDialog,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -29,6 +30,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
 
 from serial.tools import list_ports
 
@@ -51,8 +53,16 @@ PARITY = {
     "Even": serial.PARITY_EVEN,
 }
 
+RECEIVE_LIMIT_OPTIONS = {
+    "512KB": 512 * 1024,
+    "1MB": 1 * 1024 * 1024,
+    "10MB": 10 * 1024 * 1024,
+    "40MB": 40 * 1024 * 1024,
+}
+
 
 def resource_path(relative_path: str) -> str:
+
     base_path = getattr(sys, "_MEIPASS", os.path.abspath("."))
     return os.path.join(base_path, relative_path)
 
@@ -104,7 +114,10 @@ class SerialTab(QWidget):
         self.reader_thread: Optional[SerialReadThread] = None
         self.rx_count = 0
         self.tx_count = 0
+        self._displayed_text_bytes = 0
+        self._txt_log_write_error_notified = False
         self._build_ui()
+
         self.refresh_ports()
 
     def _build_ui(self) -> None:
@@ -203,12 +216,32 @@ class SerialTab(QWidget):
         self.loop_interval_spin.setRange(10, 60000)
         self.loop_interval_spin.setValue(1000)
         self.loop_interval_spin.setSuffix(" ms")
+
+        self.receive_limit_combo = QComboBox()
+        for label, size in RECEIVE_LIMIT_OPTIONS.items():
+            self.receive_limit_combo.addItem(label, size)
+        self.receive_limit_combo.setCurrentText("10MB")
+
         self.clear_button = QPushButton("清空接收区")
 
         control_bottom_layout.addWidget(self.loop_send_checkbox)
         control_bottom_layout.addWidget(self.loop_interval_spin)
+        control_bottom_layout.addSpacing(8)
+        control_bottom_layout.addWidget(QLabel("接收上限"))
+        control_bottom_layout.addWidget(self.receive_limit_combo)
+        control_bottom_layout.addSpacing(8)
         control_bottom_layout.addWidget(self.clear_button)
         control_bottom_layout.addStretch(1)
+
+        log_file_layout = QHBoxLayout()
+        self.log_to_file_checkbox = QCheckBox("实时写入TXT")
+        self.log_file_path_input = QLineEdit()
+        self.log_file_path_input.setPlaceholderText("选择TXT文件路径")
+        self.select_log_file_button = QPushButton("选择文件")
+
+        log_file_layout.addWidget(self.log_to_file_checkbox)
+        log_file_layout.addWidget(self.log_file_path_input, 1)
+        log_file_layout.addWidget(self.select_log_file_button)
 
         self.stats_label = QLabel("RX: 0 bytes | TX: 0 bytes | 未连接")
 
@@ -219,7 +252,9 @@ class SerialTab(QWidget):
         root_layout.addLayout(send_input_layout)
         root_layout.addLayout(control_top_layout)
         root_layout.addLayout(control_bottom_layout)
+        root_layout.addLayout(log_file_layout)
         root_layout.addWidget(self.stats_label)
+
 
 
 
@@ -238,6 +273,10 @@ class SerialTab(QWidget):
         self.search_input.returnPressed.connect(lambda: self.find_text(forward=True))
         self.highlight_button.clicked.connect(self.highlight_all_matches)
         self.clear_highlight_button.clicked.connect(self.clear_highlight)
+        self.receive_limit_combo.currentIndexChanged.connect(self._trim_receive_area_to_limit)
+        self.select_log_file_button.clicked.connect(self.select_log_file)
+        self.log_to_file_checkbox.stateChanged.connect(self._on_log_to_file_changed)
+
 
 
     def _on_loop_send_changed(self, state: int) -> None:
@@ -246,6 +285,76 @@ class SerialTab(QWidget):
         else:
             self.loop_timer.stop()
 
+    def _current_receive_limit_bytes(self) -> int:
+        selected = self.receive_limit_combo.currentData()
+        if isinstance(selected, int) and selected > 0:
+            return selected
+        return RECEIVE_LIMIT_OPTIONS["10MB"]
+
+    def _trim_receive_area_to_limit(self) -> None:
+        limit_bytes = self._current_receive_limit_bytes()
+        if self._displayed_text_bytes <= limit_bytes:
+            return
+
+        doc = self.receive_area.document()
+        while self._displayed_text_bytes > limit_bytes and doc.blockCount() > 1:
+            first_block = doc.firstBlock()
+            first_text = first_block.text()
+            removed_bytes = len((first_text + "\n").encode("utf-8", errors="replace"))
+
+            cursor = QTextCursor(doc)
+            cursor.setPosition(first_block.position())
+            cursor.select(QTextCursor.BlockUnderCursor)
+            cursor.removeSelectedText()
+            cursor.deleteChar()
+
+            self._displayed_text_bytes = max(0, self._displayed_text_bytes - removed_bytes)
+
+        if self._displayed_text_bytes > limit_bytes and doc.blockCount() <= 1:
+            self.receive_area.clear()
+            self._displayed_text_bytes = 0
+
+    def select_log_file(self) -> None:
+        current_path = self.log_file_path_input.text().strip()
+        initial_dir = os.path.dirname(current_path) if current_path else os.path.expanduser("~")
+        file_path, _ = QFileDialog.getSaveFileName(self, "选择日志文件", initial_dir, "Text Files (*.txt)")
+        if file_path:
+            if not file_path.lower().endswith(".txt"):
+                file_path += ".txt"
+            self.log_file_path_input.setText(file_path)
+
+    def _on_log_to_file_changed(self, state: int) -> None:
+        if state != Qt.Checked:
+            return
+
+        path = self.log_file_path_input.text().strip()
+        if path:
+            return
+
+        QMessageBox.warning(self, "提示", "请先选择TXT文件路径")
+        self.log_to_file_checkbox.setChecked(False)
+
+    def _append_rx_to_file(self, line: str) -> None:
+        if not self.log_to_file_checkbox.isChecked():
+            return
+
+        file_path = self.log_file_path_input.text().strip()
+        if not file_path:
+            return
+
+        try:
+            folder = os.path.dirname(file_path)
+            if folder:
+                os.makedirs(folder, exist_ok=True)
+            with open(file_path, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+            self._txt_log_write_error_notified = False
+        except Exception as e:
+            if not self._txt_log_write_error_notified:
+                QMessageBox.critical(self, "写入日志失败", str(e))
+                self._txt_log_write_error_notified = True
+            self.log_to_file_checkbox.setChecked(False)
+
     def refresh_ports(self) -> None:
         current = self.port_combo.currentText()
         self.port_combo.clear()
@@ -253,6 +362,7 @@ class SerialTab(QWidget):
         self.port_combo.addItems(ports)
         if current and current in ports:
             self.port_combo.setCurrentText(current)
+
 
     def get_config(self) -> SerialConfig:
         return SerialConfig(
@@ -316,9 +426,13 @@ class SerialTab(QWidget):
 
     def append_log(self, text: str) -> None:
         self.receive_area.appendPlainText(text)
+        self._displayed_text_bytes += len((text + "\n").encode("utf-8", errors="replace"))
+        self._trim_receive_area_to_limit()
+
         if self.auto_scroll_checkbox.isChecked():
             scrollbar = self.receive_area.verticalScrollBar()
             scrollbar.setValue(scrollbar.maximum())
+
 
 
     def _decode_bytes(self, data: bytes) -> str:
@@ -343,11 +457,14 @@ class SerialTab(QWidget):
 
         if self.timestamp_checkbox.isChecked():
             ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-            self.append_log(f"[{ts}] RX: {body}")
+            line = f"[{ts}] RX: {body}"
         else:
-            self.append_log(body)
+            line = body
 
+        self.append_log(line)
+        self._append_rx_to_file(line)
         self.update_stats("已连接")
+
 
     def _parse_send_payload(self, text: str) -> bytes:
         if self.hex_mode_checkbox.isChecked():
@@ -447,7 +564,9 @@ class SerialTab(QWidget):
 
     def clear_receive_area(self) -> None:
         self.receive_area.clear()
+        self._displayed_text_bytes = 0
         self.clear_highlight()
+
 
     def update_stats(self, status_text: str) -> None:
         self.stats_label.setText(f"RX: {self.rx_count} bytes | TX: {self.tx_count} bytes | {status_text}")
